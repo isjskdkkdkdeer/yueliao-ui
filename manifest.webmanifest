@@ -1,0 +1,15 @@
+{
+  "id": "/",
+  "name": "越聊 YueLiao · 中越双语聊天与通话",
+  "short_name": "越聊",
+  "lang": "zh-CN",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#090b0e",
+  "theme_color": "#090b0e",
+  "icons": [
+    {"src": "/assets/pwa-icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any"},
+    {"src": "/assets/pwa-icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable"}
+  ]
+}
