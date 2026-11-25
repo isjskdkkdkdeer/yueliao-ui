@@ -70,16 +70,49 @@ export async function prepareLocalLanguages(signal) {
 }
 
 export async function translationCapabilities() {
-  if (!nativeChannel('yueliaoSpeech')) return null;
+  if (!nativeChannel('appleTranslate')) return null;
   const {text}=await nativeTranslation({action:'capabilities'});
   return JSON.parse(text);
 }
 
 const fail = (message, code) => Object.assign(new Error(message), {code});
 
-async function performTranslation(text, source, target, options, online) {
+let cloudConsentDialog;
+
+function requestCloudConsent(inShell) {
+  const message = '允许越聊在本机翻译不可用时，将待翻译的文字发送到在线翻译服务？';
+  if (!inShell) return window.confirm(message);
+  if (!cloudConsentDialog) {
+    cloudConsentDialog = new Promise(resolve => {
+      const dialog = document.createElement('dialog');
+      dialog.setAttribute('aria-label', '在线备用翻译');
+      const form = document.createElement('form');
+      form.method = 'dialog';
+      const content = document.createElement('p');
+      content.textContent = message;
+      form.append(content);
+      for (const [value, label] of [['cancel', '暂不允许'], ['allow', '允许在线翻译']]) {
+        const button = document.createElement('button');
+        button.value = value;
+        button.textContent = label;
+        form.append(button);
+      }
+      dialog.append(form);
+      dialog.addEventListener('close', () => {
+        dialog.remove();
+        resolve(dialog.returnValue === 'allow');
+      }, {once:true});
+      document.body.append(dialog);
+      dialog.showModal();
+    }).finally(() => { cloudConsentDialog = undefined; });
+  }
+  return cloudConsentDialog;
+}
+
+async function performTranslation(text, source, target, options, inShell) {
   let localError;
-  if (nativeChannel('appleTranslate')) {
+  const canAsk = globalThis.navigator?.userActivation?.isActive === true;
+  if (inShell) {
     try {
       const result = await nativeTranslation({
         sourceText:text, fromLang:source, toLang:target, mode:options.mode,
@@ -91,15 +124,19 @@ async function performTranslation(text, source, target, options, online) {
       localError = error;
     }
   }
-  if (!online) {
-    const preferences=translationPreferences();
-    if (options.allowOnline===false || (!preferences.onlineText &&
-      (!navigator.userActivation?.isActive || !window.confirm('允许越聊将待翻译的文字发送到在线翻译服务？')))) {
-      throw localError || fail('请点击翻译按钮并允许在线翻译。','OFFLINE_ONLY');
-    }
-    if (!preferences.onlineText) setTranslationPreferences({...preferences,onlineText:true});
+  if (options.allowOnline===false) {
+    throw localError || fail('当前未允许在线翻译。','OFFLINE_ONLY');
   }
-  if (globalThis.navigator?.onLine === false) throw fail('当前离线，连接网络后可重试翻译。','NETWORK');
+  if (globalThis.navigator?.onLine === false) {
+    throw localError || fail('当前离线，连接网络后可重试翻译。','NETWORK');
+  }
+  const preferences=translationPreferences();
+  if (!preferences.onlineText) {
+    const authorized = canAsk && await requestCloudConsent(inShell);
+    options.signal?.throwIfAborted();
+    if (!authorized) throw localError || fail('请点击翻译按钮并允许在线翻译。','OFFLINE_ONLY');
+    setTranslationPreferences({...translationPreferences(),onlineText:true});
+  }
   const controller = new AbortController();
   const abort = () => controller.abort(options.signal.reason);
   options.signal?.throwIfAborted();
@@ -127,15 +164,16 @@ export async function translate(text, source='zh-CN', target='vi', options={}) {
   if (Array.from(original).length > 450) throw fail('每条翻译最多支持 450 个字。','TOO_LONG');
   const from=languageCode(source), to=languageCode(target);
   if (!from || !to || from===to) throw fail('请选择中越互译方向。','LANGUAGE');
+  const inShell=Boolean(nativeChannel('appleTranslate'));
   const online=options.allowOnline!==false&&translationPreferences().onlineText;
-  const key=JSON.stringify([from,to,original,online,options.mode,options.conversationId,options.messageId,options.context]);
-  if (cache.has(key)) return {...cache.get(key)};
+  const key=JSON.stringify([from,to,original,inShell,online,options.allowOnline!==false,options.mode,options.conversationId,options.messageId,options.context]);
+  if (!inShell && cache.has(key)) return {...cache.get(key)};
   if (!options.signal && pending.has(key)) return {...await pending.get(key)};
-  const task=performTranslation(original,from,to,options,online);
+  const task=performTranslation(original,from,to,options,inShell);
   if (!options.signal) pending.set(key,task);
   try {
     const result=await task;
-    if (options.mode!=='call') {
+    if (!inShell && options.mode!=='call') {
       if (cache.size>=150) cache.delete(cache.keys().next().value);
       if (online || !translationPreferences().onlineText) cache.set(key,result);
     }
