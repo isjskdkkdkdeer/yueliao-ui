@@ -29,21 +29,41 @@ const welcomeMessage=state.messages['ai-assistant']?.find(m=>m.id==='ai-welcome'
 write('contacts',state.contacts);write('calls',state.calls);write('messages',state.messages);
 const removedFriends=new Set(read('removed-friends',[]));
 let accountState={loading:true};
-function signInLink() {
- const fallback='/signin-with-chatgpt?return_to=%2F%3Faccount%3D1';
- const path=accountState.signInUrl;
- const url=typeof path==='string'&&path.startsWith('/signin-with-chatgpt?')?path:fallback;
- return `<a class="primary" data-account-sign-in target="_top" href="${esc(url)}">使用 ChatGPT 登录</a>`;
+async function deviceHeaders(headers={}){
+ if(!mailbox)throw Error('无法建立设备身份，请检查浏览器是否允许本站存储数据。');
+ await mailbox.ensure();
+ const token=localStorage.getItem('yueliao-mailbox-secret');
+ if(!/^[a-f0-9]{64}$/.test(token||''))throw Error('设备身份暂不可用，请刷新后重试。');
+ return {...headers,Authorization:`Bearer ${token}`};
 }
 function accountMarkup(){
  const a=accountState;
- if(a.loading)return '<p>正在检查登录状态…</p>';
- if(a.error)return '<p>暂时无法读取登录状态</p><button class="secondary" data-account-refresh>重试</button>';
- if(!a.authenticated)return `<h3>游客模式 · 即开即聊</h3><p>无需注册即可添加好友、聊天和使用文字翻译。好友号与聊天记录保存在当前设备。</p>${signInLink()} <button class="secondary" data-guest-continue>游客极速体验</button><p>登录后可使用智能助手。</p>`;
- return `<h3>登录账号已连接</h3><p class="account-login-name"><span>登录名称</span><strong data-user-content>${esc(a.name||'')}</strong></p><p data-user-content class="account-email">${esc(a.email||'')}</p><p class="account-note">登录账号信息仅用于账号识别；好友看到的是越聊资料中的昵称和头像。</p><p>智能助手：${!a.assistantConfigured?'暂不可用':a.assistantAuthorized?'可使用':'暂不可用'}</p><p>云端通话字幕：${!a.speechConfigured?'服务未配置':a.speechAuthorized?'账号已开通':'当前账号未开通'}</p><a class="secondary" target="_top" href="${esc(a.signOutUrl)}">退出账号</a><p>好友和本机聊天记录保存在当前设备。</p>`;
+ if(a.loading)return '<p>正在连接设备身份…</p>';
+ if(a.error||!a.authenticated)return '<p>暂时无法连接设备身份</p><button class="secondary" data-account-refresh>重试</button>';
+ return `<h3>已登录 · 设备身份</h3><p class="account-login-name"><span>设备昵称</span><strong data-user-content>${esc(a.name||state.profile.name)}</strong></p><p>智能助手：${a.assistantConfigured&&a.assistantAuthorized?'可使用':'暂不可用'}</p><p>云端通话字幕：${!a.speechConfigured?'服务未配置':a.speechAuthorized?'已开通':'此设备未开通'}</p><p>好友和本机聊天记录保存在当前设备。</p>`;
 }
-function renderAccount(){document.querySelectorAll('[data-account-panel]').forEach(el=>{el.innerHTML=accountMarkup();el.querySelector('[data-account-refresh]')?.addEventListener('click',loadAccount);el.querySelector('[data-guest-continue]')?.addEventListener('click',closeModal)});const b=document.querySelector('[data-action="account"]');if(b){const label=accountState.loading?'账号…':accountState.error?'账号状态':accountState.authenticated?'已登录 · 账号':'游客模式';b.title=label;b.setAttribute('aria-label',label)}}
-async function loadAccount(){accountState={loading:true};renderAccount();try{const r=await fetch('/api/account',{cache:'no-store',credentials:'same-origin',signal:AbortSignal.timeout(10000)});if(!r.ok)throw Error();accountState=await r.json()}catch{accountState={error:true}}renderAccount()}
+function renderAccount(){
+ document.querySelectorAll('[data-account-panel]').forEach(el=>{
+  el.innerHTML=accountMarkup();
+  el.querySelector('[data-account-refresh]')?.addEventListener('click',loadAccount);
+ });
+ const button=document.querySelector('[data-action="account"]');
+ if(button){
+  const label=accountState.loading?'正在连接设备':accountState.authenticated?'已登录 · 设备身份':'设备身份未连接';
+  button.title=label;
+  button.setAttribute('aria-label',label);
+ }
+}
+async function loadAccount(){
+ accountState={loading:true};renderAccount();
+ try{
+  const headers=await deviceHeaders();
+  const response=await fetch('/api/account',{headers,cache:'no-store',credentials:'same-origin',signal:AbortSignal.timeout(10000)});
+  if(!response.ok)throw Error();
+  accountState=await response.json();
+ }catch{accountState={error:true}}
+ renderAccount();
+}
 function accountModal(){openModal('<h2>使用状态</h2><div class="account-panel" data-account-panel></div>',()=>{renderAccount();loadAccount()})}
 if(new URLSearchParams(location.search).has('account'))state.tab='settings';
 window.addEventListener('pageshow',()=>loadAccount());
@@ -173,8 +193,16 @@ async function sendAssistant(){
  const button=document.querySelector('#send-button');if(button){button.disabled=true;button.textContent='思考中…'}
  try{
   const messages=(state.messages[id]||[]).filter(m=>m.id!=='ai-welcome'&&!m.error&&m.text).slice(-12).map(m=>({role:m.out?'user':'assistant',content:m.text}));
-  const response=await fetch('/api/assistant',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({messages}),signal:AbortSignal.timeout(45000)});
-  const data=await response.json();if(!response.ok){if(response.status===401)openModal(`<h2>登录后使用智能助手</h2><p>智能助手共用当前越聊登录会话。</p>${signInLink()} <button class="secondary" data-action="assistant-unavailable-close">继续使用越聊</button>`,()=>{document.querySelector('[data-action="assistant-unavailable-close"]').onclick=closeModal});throw Error(data.error||'AI 暂时无法回复，请稍后重试')}
+  const headers=await deviceHeaders({'Content-Type':'application/json'});
+  const response=await fetch('/api/assistant',{method:'POST',headers,body:JSON.stringify({messages}),signal:AbortSignal.timeout(45000)});
+  const data=await response.json();
+  if(response.status===401){
+   openModal('<h2>设备身份暂不可用</h2><p>刷新网页后，越聊会尝试重新连接此设备。连接后可再次发送消息。</p><button class="secondary" data-action="assistant-unavailable-close">继续使用越聊</button>',()=>{
+    document.querySelector('[data-action="assistant-unavailable-close"]').onclick=closeModal;
+   });
+   throw Error('智能助手暂时无法识别此设备，请刷新后重试。');
+  }
+  if(!response.ok)throw Error(data.error||'AI 暂时无法回复，请稍后重试');
   const reply={id:uid(),kind:'text',text:data.text,out:false,lang:assistantLanguage(data.text,lang),time:now()};pushMessage(id,reply);if(state.auto)await translateAssistantMessage(reply);
  }catch(e){pushMessage(id,{id:uid(),text:e.name==='TimeoutError'?'回复超时，请重新发送。':e.message,out:false,lang,time:now(),error:true})}
  finally{await outgoingTranslation;state.sending=false;const b=document.querySelector('#send-button');if(b){b.disabled=false;b.innerHTML=`发送 ${icon('send')}`}}
@@ -332,17 +360,14 @@ function captionLane(side,label){
 }
 function renderCall(){
   const call=state.call;if(!call)return;const c=call.contact;closeModal();
-  document.querySelector('#modal-root').innerHTML=`<div class="call-overlay" role="dialog" aria-modal="true" aria-label="${call.kind==='video'?'视频':'语音'}通话"><div class="call-ambient"></div><video id="remote-video" class="call-video" autoplay playsinline style="display:none"></video><video id="local-video" class="local-video" autoplay muted playsinline style="display:none"></video><audio id="remote-audio" autoplay></audio><div class="cloud-caption-options" id="caption-signin-panel" ${call.captionAuthRequired?'':'hidden'}><small>请登录后使用云端字幕。</small><button type="button" id="caption-signin">结束通话并登录</button></div><div class="call-language-pill">${call.captionLanguage==='vi'?'🇻🇳 Tiếng Việt ⇄ 🇨🇳 中文':'🇨🇳 中文 ⇄ 🇻🇳 Tiếng Việt'}</div><div class="call-peer-chip"><i></i>${esc(c.name)}</div><div class="caption-tools"><button class="call-subtitle-toggle" id="subtitle-toggle">${icon('translate')} 开启字幕</button><label class="call-language-select"><select id="subtitle-language" aria-label="字幕语言"><option value="zh" ${call.captionLanguage==='zh'?'selected':''}>中文</option><option value="vi" ${call.captionLanguage==='vi'?'selected':''}>Tiếng Việt</option></select></label><button class="typed-caption-toggle" id="caption-text-toggle">${icon('chat')} 键盘输入</button><form id="caption-text-form" hidden><input id="caption-text-input" maxlength="450" placeholder="说点什么…" aria-label="发送文字消息"><button type="submit">发送字幕</button></form></div><div class="call-header"><div class="call-label">${call.kind==='video'?'视频':'语音'}通话</div><h2 id="call-timer">${call.incoming?'好友邀请你通话':call.demo?'':'正在呼叫…'}</h2></div><div class="call-person" id="call-person"><button type="button" id="call-ring-retry" class="secondary" style="margin-bottom:16px" ${callStarted||call.demo?'hidden':''}>🔊 点此开启呼叫铃声</button>${avatar(c)}<h2 data-user-content>${contactName(c)} ${esc(c.cn||'')}</h2><p>${call.demo?'声音，让距离更近。':call.incoming?'来聊聊今天吧':'等待好友接听'}</p></div><div class="call-subtitles"><div class="caption-heading" hidden><span id="subtitle-remote-state">对方尚未开启字幕</span></div><div class="call-bubble-feed" role="log" aria-label="双语通话记录" aria-live="polite"></div><div class="caption-lanes" hidden>${captionLane('local','我说的')}${captionLane('remote','她说的')}</div><p class="subtitle-status" id="subtitle-status">取得麦克风权限后自动开启字幕</p><p class="caption-privacy" id="caption-privacy" hidden>语音识别与翻译会使用在线服务，详情见隐私说明。</p></div><p class="call-privacy"><a href="/privacy.html" target="_blank" rel="noopener">隐私说明</a></p><div class="call-controls"><div class="control"><button id="call-mic" aria-label="静音">${icon('mic')}</button><span>麦克风</span></div>${call.kind==='video'?`<div class="control"><button id="call-camera" aria-label="关闭摄像头">${icon('video')}</button><span>摄像头</span></div>`:''}<div class="control"><button class="hangup" id="call-hangup" aria-label="挂断">${icon('hangup')}</button><span>${call.incoming?'拒绝':'结束通话'}</span></div><div class="control speaker-control"><button id="call-speaker" aria-label="关闭通话声音" aria-pressed="true">${icon('volume')}</button><span>声音</span></div>${call.incoming?`<div class="control"><button class="answer" id="call-answer" aria-label="接听">${icon('phone')}</button><span>接听</span></div>`:''}</div></div>`;
+  document.querySelector('#modal-root').innerHTML=`<div class="call-overlay" role="dialog" aria-modal="true" aria-label="${call.kind==='video'?'视频':'语音'}通话"><div class="call-ambient"></div><video id="remote-video" class="call-video" autoplay playsinline style="display:none"></video><video id="local-video" class="local-video" autoplay muted playsinline style="display:none"></video><audio id="remote-audio" autoplay></audio><div class="cloud-caption-options" id="caption-device-panel" ${call.captionAuthRequired?'':'hidden'}><small>尚未识别此设备，云端字幕暂不可用。</small><button type="button" id="caption-device-retry">重试字幕</button></div><div class="call-language-pill">${call.captionLanguage==='vi'?'🇻🇳 Tiếng Việt ⇄ 🇨🇳 中文':'🇨🇳 中文 ⇄ 🇻🇳 Tiếng Việt'}</div><div class="call-peer-chip"><i></i>${esc(c.name)}</div><div class="caption-tools"><button class="call-subtitle-toggle" id="subtitle-toggle">${icon('translate')} 开启字幕</button><label class="call-language-select"><select id="subtitle-language" aria-label="字幕语言"><option value="zh" ${call.captionLanguage==='zh'?'selected':''}>中文</option><option value="vi" ${call.captionLanguage==='vi'?'selected':''}>Tiếng Việt</option></select></label><button class="typed-caption-toggle" id="caption-text-toggle">${icon('chat')} 键盘输入</button><form id="caption-text-form" hidden><input id="caption-text-input" maxlength="450" placeholder="说点什么…" aria-label="发送文字消息"><button type="submit">发送字幕</button></form></div><div class="call-header"><div class="call-label">${call.kind==='video'?'视频':'语音'}通话</div><h2 id="call-timer">${call.incoming?'好友邀请你通话':call.demo?'':'正在呼叫…'}</h2></div><div class="call-person" id="call-person"><button type="button" id="call-ring-retry" class="secondary" style="margin-bottom:16px" ${callStarted||call.demo?'hidden':''}>🔊 点此开启呼叫铃声</button>${avatar(c)}<h2 data-user-content>${contactName(c)} ${esc(c.cn||'')}</h2><p>${call.demo?'声音，让距离更近。':call.incoming?'来聊聊今天吧':'等待好友接听'}</p></div><div class="call-subtitles"><div class="caption-heading" hidden><span id="subtitle-remote-state">对方尚未开启字幕</span></div><div class="call-bubble-feed" role="log" aria-label="双语通话记录" aria-live="polite"></div><div class="caption-lanes" hidden>${captionLane('local','我说的')}${captionLane('remote','她说的')}</div><p class="subtitle-status" id="subtitle-status">取得麦克风权限后自动开启字幕</p><p class="caption-privacy" id="caption-privacy" hidden>语音识别与翻译会使用在线服务，详情见隐私说明。</p></div><p class="call-privacy"><a href="/privacy.html" target="_blank" rel="noopener">隐私说明</a></p><div class="call-controls"><div class="control"><button id="call-mic" aria-label="静音">${icon('mic')}</button><span>麦克风</span></div>${call.kind==='video'?`<div class="control"><button id="call-camera" aria-label="关闭摄像头">${icon('video')}</button><span>摄像头</span></div>`:''}<div class="control"><button class="hangup" id="call-hangup" aria-label="挂断">${icon('hangup')}</button><span>${call.incoming?'拒绝':'结束通话'}</span></div><div class="control speaker-control"><button id="call-speaker" aria-label="关闭通话声音" aria-pressed="true">${icon('volume')}</button><span>声音</span></div>${call.incoming?`<div class="control"><button class="answer" id="call-answer" aria-label="接听">${icon('phone')}</button><span>接听</span></div>`:''}</div></div>`;
   document.querySelector('#call-speaker').onclick=()=>{
     call.speakerMuted=!call.speakerMuted;
     for(const id of ['remote-video','remote-audio'])document.getElementById(id).muted=call.speakerMuted;
     const button=document.querySelector('#call-speaker');button.classList.toggle('off',call.speakerMuted);button.setAttribute('aria-pressed',String(!call.speakerMuted));button.setAttribute('aria-label',call.speakerMuted?'开启通话声音':'关闭通话声音');
   };
   document.querySelector('#call-hangup').onclick=endCall;
-  document.querySelector('#caption-signin').onclick=()=>{
-    endCall();
-    location.assign('/signin-with-chatgpt?return_to=%2F%3Faccount%3D1');
-  };
+  document.querySelector('#caption-device-retry').onclick=()=>toggleSubtitles();
 
   document.querySelector('#call-ring-retry').onclick=()=>ringer.start(call.wasIncoming?'incoming':'outgoing');
   document.querySelector('#call-mic').onclick=()=>{
@@ -453,15 +478,17 @@ async function toggleSubtitles({automatic=false}={}){
   const language=call.captionLanguage==='vi'?'vi-VN':'zh-CN';let recognition;
   try{
     const callbacks={language,onText:event=>processCaptionText(call,event.text,event.isFinal,recognition),onState:s=>handleCaptionState(call,recognition,s),onError:e=>handleCaptionError(call,recognition,e)};
-    const response=await fetch('/api/speech-config',{credentials:'same-origin'});
+    const headers=await deviceHeaders();
+    if(state.call!==call||call.subtitleStartGeneration!==startGeneration)return;
+    const response=await fetch('/api/speech-config',{headers,credentials:'same-origin',signal:AbortSignal.timeout(10000)});
     if(!response.ok)throw new Error('语音字幕暂不可用');
     const config=await response.json();
     if(state.call!==call||call.subtitleStartGeneration!==startGeneration)return;
     if(!config.configured)throw new Error('云端字幕服务未配置。');
     call.captionAuthRequired=!config.authenticated;
-    const signInPanel=document.querySelector('#caption-signin-panel');
-    if(signInPanel)signInPanel.hidden=!call.captionAuthRequired;
-    if(call.captionAuthRequired)throw new Error('请登录后使用云端字幕。');
+    const devicePanel=document.querySelector('#caption-device-panel');
+    if(devicePanel)devicePanel.hidden=!call.captionAuthRequired;
+    if(call.captionAuthRequired)throw new Error('尚未识别此设备，请重试云端字幕。');
     if(!config.authorized)throw new Error('当前账号未开通云端字幕。');
     recognition=createAudioTranscriber({...callbacks,stream:callStream});
     if(!recognition.supported){
